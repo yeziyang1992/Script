@@ -19,31 +19,82 @@ def run_sql_query(host, port, username, password, table_name):
     WHERE table_name = '{table_name}'
     """
 
-    try:
-        df_table_id = pd.read_sql_query(sql_table_id_query, db_connection)
-        if len(df_table_id) < 1:
-            raise ValueError(f"Table with name '{table_name}' not found.")
-        
-        table_id = df_table_id['id'][0]
+    df_table_id = pd.read_sql_query(sql_table_id_query, db_connection)
+    if len(df_table_id) < 1:
+        raise ValueError(f"Table with name '{table_name}' not found.")
+    
+    table_id = df_table_id['id'][0]
 
-        # 查询表ID对应的字段信息
-        sql_field_info_query = f"""
-        SELECT x.field_name, x.field_type, x.field_desc FROM resourceconfig.t_resource_search_field_info x
-        WHERE table_id = '{table_id}'
-        """
+    # 查询表ID对应的字段信息
+    sql_field_info_query = f"""
+    SELECT x.field_name, x.field_type, x.field_desc FROM resourceconfig.t_resource_search_field_info x
+    WHERE table_id = '{table_id}'
+    """
 
-        df_field_info = pd.read_sql_query(sql_field_info_query, db_connection)
+    df_field_info = pd.read_sql_query(sql_field_info_query, db_connection)
+    return df_field_info
 
-        if len(df_field_info) < 1:
-            raise ValueError(f"No fields found for table '{table_name}'.")
+def get_table_fields(table_name):
+    sql = f"DESCRIBE {table_name}"
+    print(sql)
+    with hive.connect(host='172.16.80.25', port=10000, username='') as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(sql)
+            result = cursor.fetchall()
+            fields = [field[0] for field in result]
+            types = [field[1] for field in result]
+            ind = types.index(None)
+            fields = fields[:ind]
+            types = types[:ind]
+            print("SQL statement executed successfully.")
+        except Exception as e:
+            print("Error executing SQL statement:", e)
+            fields = []
+            types = []
+    return fields,types
 
-        excel_file_path = f'./excels/{table_name}_result.xlsx'
-        df_field_info.to_excel(excel_file_path, index=False)
-        return excel_file_path
 
-    except Exception as e:
-        logger.error(f"Error: {str(e)}")
-        return str(e)
+def check_table_schema_consistency(host, port, username, password, source_table, hive_table):
+    # 映射字典，将原始类型映射为新类型
+    type_mapping = {
+        'int': 'Integer',
+        'string': 'String',
+        'bigint': 'Long',
+        'decimal(16,6)': 'Double'
+    }
+
+    result = run_sql_query(host, port, username, password, source_table)
+    # 添加一个名为 'new_column' 的空白列
+    result[''] = None 
+    hive_fields,hive_types = get_table_fields(hive_table)
+
+    result['hive_fields'] = hive_fields + [None] * (len(result) - len(hive_fields))
+    result['hive_types'] = hive_types + [None] * (len(result) - len(hive_types))
+    
+    result['new_hive_types'] = result['hive_types'].map(type_mapping)
+    
+    result['field_equal'] = result['field_name'] == result['hive_fields']
+    result['types_equal'] = result['new_hive_types'] == result['field_type']
+
+    # 添加 'has_whitespace' 列，判断 'field_name' 中的值是否包含空格
+    result['资源表含有空格'] = result['field_name'].str.contains(' ')
+    result['Hive表含有空格'] = result['hive_fields'].str.contains(' ')
+    
+    # 重命名列名
+    result = result.rename(columns={'field_name': '资源表字段', 
+                            'field_type': '资源表类型', 
+                            'field_desc': '资源表描述',
+                            'hive_fields': 'Hive表字段',
+                            'hive_types': 'Hive表类型',
+                            'new_hive_types': '新Hive表类型',
+                            'field_equal': '字段相等',
+                            'types_equal': '类型相等',})
+
+    excel_file_path = f'./excels/{source_table}_result.xlsx'
+    result.to_excel(excel_file_path, index=False)
+    return excel_file_path
+
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
